@@ -75,10 +75,39 @@ namespace Awsim.Common
                 var id = relation.Id;
                 var leftBorder = GetLine(relation, "left");
                 var rightBorder = GetLine(relation, "right");
+                OrientBounds(ref leftBorder, ref rightBorder);
                 var lanelet = new LaneletData(id, attributes, leftBorder, rightBorder);
                 _map.Add(lanelet);
             }
         }
+
+        // Beytepe: OSM'de sınır çizgileri (way) lanelet yönünün tersine kaydedilmiş olabilir. Lanelet2/Autoware
+        // yönü geometriden (sol sınır solda kalacak şekilde) belirler; aynı kural burada uygulanır, yoksa
+        // TrafficLane'ler ters yönde üretilir. Paylaşılan çizgi nesneleri değiştirilmez, ters kopya kullanılır.
+        static Vector2 RosXY(Vector3 u) => new Vector2(u.z, -u.x);   // ROS düzlemi: x = unity.z, y = -unity.x
+
+        static void OrientBounds(ref LaneletLineStringData left, ref LaneletLineStringData right)
+        {
+            if (left == null || right == null || left.Points.Length < 2 || right.Points.Length < 2)
+                return;
+            var L = left.Points; var R = right.Points;
+            int nl = L.Length - 1, nr = R.Length - 1;
+            float same = Vector2.Distance(RosXY(L[0]), RosXY(R[0])) + Vector2.Distance(RosXY(L[nl]), RosXY(R[nr]));
+            float cross = Vector2.Distance(RosXY(L[0]), RosXY(R[nr])) + Vector2.Distance(RosXY(L[nl]), RosXY(R[0]));
+            if (same > cross)
+                right = Reversed(right);
+            R = right.Points;
+            var dir = (RosXY(L[nl]) + RosXY(R[nr]) - RosXY(L[0]) - RosXY(R[0])) * 0.5f;
+            var side = RosXY(L[L.Length / 2]) - RosXY(R[R.Length / 2]);
+            if (dir.x * side.y - dir.y * side.x < 0f)   // sol sınır sağda kalıyor -> ikisini de çevir
+            {
+                left = Reversed(left);
+                right = Reversed(right);
+            }
+        }
+
+        static LaneletLineStringData Reversed(LaneletLineStringData s)
+            => new LaneletLineStringData(s.Id, s.Attributes, s.Points.Reverse().ToArray());
 
         void LoadRegulatoryElements(OsmData osm)
         {

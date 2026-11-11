@@ -650,7 +650,10 @@ namespace Awsim.Usecase.TrafficSimulation
                         refState.DominatingVehicle = dominatingVehicle;
                         return true;
                     }
-                    else if (IsLaneDominatedByVehicle(lane, EgoTransform.position, EgoTransform.forward))
+                    // Beytepe: ego bu NPC'yle çakışmadan önce bekliyorsa (Autoware yol veriyorsa) NPC de ego için beklemez.
+                    // Ayrıntı: Assets/Beytepe/Runtime/BeytepeNpcEgoAwareness.cs (IsEgoWaitingFor; JSON "ReleaseWhenEgoWaits")
+                    else if (IsLaneDominatedByVehicle(lane, EgoTransform.position, EgoTransform.forward)
+                             && !Beytepe.Runtime.BeytepeNpcEgoAwareness.IsEgoWaitingFor(refState))
                     {
                         refState.YieldPoint = stopPoint;
                         refState.DominatingVehicle = EgoTransform;
@@ -1143,6 +1146,12 @@ namespace Awsim.Usecase.TrafficSimulation
                 States = states
             }.Execute();
 
+            Profiler.EndSample();
+
+            // Beytepe: NPC'lerin egoyu hesaba katması (kesme algısı + kavşak ve birleşmede yol verme).
+            // Ayrıntı ve ayarlar: Assets/Beytepe/Runtime/BeytepeNpcEgoAwareness.cs
+            Profiler.BeginSample("Cognition.BeytepeEgoAwareness");
+            Beytepe.Runtime.BeytepeNpcEgoAwareness.Apply(states, egoTransform);
             Profiler.EndSample();
         }
 

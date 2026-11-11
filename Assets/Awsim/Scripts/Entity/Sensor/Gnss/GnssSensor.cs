@@ -111,12 +111,22 @@ namespace Awsim.Entity
 
             _outputData.Mgrs = new Mgrs(mgrsPosition, mgrsBase.GridZone);
 
-            string mgrsString = mgrsBase.GridZone + string.Format("{0:D9}", (int)(mgrsPosition.x * 10000)) + string.Format("{0:D9}", (int)(mgrsPosition.y * 10000)); 
-            (int utmZone, bool utmNorthp, double utmX, double utmY, int utmPrec) = GeographicLib.Geocodes.MGRS.Reverse(mgrsString.AsSpan());
-            (double latDeg, double lonDeg) = GeographicLib.UTMUPS.Reverse(utmZone, utmNorthp, utmX, utmY);
+            // [Beytepe düzeltmesi] Yerel (Local projektör) haritada koordinatlar negatif olabilir; MGRS dizesi
+            // üretilemez ve her çıktıda GeographicException atılırdı. Enlem/boylam yalnız NavSatFix modunda
+            // gerekir; hesaplanamazsa boş bırakılır, Mgrs modundaki konum (harita çerçevesi) yine yayınlanır.
+            try
+            {
+                string mgrsString = mgrsBase.GridZone + string.Format("{0:D9}", (int)(mgrsPosition.x * 10000)) + string.Format("{0:D9}", (int)(mgrsPosition.y * 10000)); 
+                (int utmZone, bool utmNorthp, double utmX, double utmY, int utmPrec) = GeographicLib.Geocodes.MGRS.Reverse(mgrsString.AsSpan());
+                (double latDeg, double lonDeg) = GeographicLib.UTMUPS.Reverse(utmZone, utmNorthp, utmX, utmY);
 
-            double height = mgrsPosition.z; 
-            _outputData.GeoCoordinate = new GeoCoordinate(latDeg, lonDeg, height);
+                double height = mgrsPosition.z; 
+                _outputData.GeoCoordinate = new GeoCoordinate(latDeg, lonDeg, height);
+            }
+            catch (Exception)
+            {
+                _outputData.GeoCoordinate = null;
+            }
 
             // Calls registered callbacks.
             OnOutput?.Invoke(_outputData);

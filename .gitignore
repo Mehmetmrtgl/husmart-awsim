@@ -72,3 +72,9 @@ crashlytics-build.properties
 # JetBrains
 /.idea/
 
+
+# Beytepe: sahne her derlemede demo sahnesinden yeniden üretilir (49 MB)
+/Assets/Beytepe/BeytepeSimulation.unity
+# Beytepe "gerçek dünya" denemesinin zemin karoları (0.5 GB, yalnız BEYTEPE_WORLD=gercek)
+/Assets/Beytepe/Model/Gercek/Zemin/
+/Assets/Beytepe/Model/Gercek/Zemin.meta

@@ -344,7 +344,8 @@ namespace Awsim.Entity
 
         // Cache previous frame values.
         Vector3 _lastVelocity = Vector3.zero;
-        Quaternion _lastRotation = new Quaternion();
+        Quaternion _lastRotation = Quaternion.identity;
+        bool _hasLastRotation = false;
         Vector3 _lastAngularVelocity = Vector3.zero;
 
         /// <summary>
@@ -397,7 +398,21 @@ namespace Awsim.Entity
 
             // Angular velocity and angular acceleration.
             _lastAngularVelocity = AngularVelocity;
-            AngularVelocity = ((_transform.rotation.eulerAngles - _lastRotation.eulerAngles) / Time.deltaTime) * Mathf.Deg2Rad;
+            // [Beytepe düzeltmesi] Orijinal kod _lastRotation'ı hiç güncellemiyordu; araç dururken bile
+            // heading_rate = yaw(derece)/dt gibi anlamsız değerler (ör. 482 rad/s) çıkıyordu ve Autoware
+            // "The vehicle is not stopped" diyerek konum başlatmayı reddediyordu. ImuSensor ile aynı yöntem:
+            var currentRotation = _transform.rotation;
+            if (!_hasLastRotation)
+            {
+                _lastRotation = currentRotation;
+                _hasLastRotation = true;
+            }
+            (currentRotation * Quaternion.Inverse(_lastRotation)).ToAngleAxis(out float deltaAngleDeg, out Vector3 deltaAxis);
+            if (deltaAngleDeg > 180f) deltaAngleDeg -= 360f;
+            AngularVelocity = (float.IsFinite(deltaAxis.x) && float.IsFinite(deltaAxis.y) && float.IsFinite(deltaAxis.z))
+                ? deltaAxis * (deltaAngleDeg * Mathf.Deg2Rad / Time.deltaTime)
+                : Vector3.zero;
+            _lastRotation = currentRotation;
             AngularAcceleration = ((AngularVelocity - _lastAngularVelocity) / Time.deltaTime);
 
             // --- Apply first order lag ---
@@ -466,10 +481,19 @@ namespace Awsim.Entity
                 var isMinusSpeed = Speed < 0;
                 var isPlusSpeed = Speed > 0;
 
+                // [Beytepe düzeltmesi] Eğimde fren tutma: orijinal kod, araç dururken gelen HER negatif ivme
+                // komutunda aracı tamamen donduruyordu (FreezeAll). Autoware ise yokuş aşağıda yerçekimini
+                // hesaba katıp (slope compensation) çok küçük bir fren (ör. -0.01 m/s²) gönderir ve aracın
+                // yerçekimiyle kalkmasını bekler -> araç hiç hareket etmiyordu. Artık araç yalnızca fren,
+                // yerçekiminin hareket yönündeki bileşenini karşılayabiliyorsa sabitlenir.
+                var gravityAlongForward = Vector3.Dot(Physics.gravity, _transform.forward);   // >0: burun aşağı (yokuş aşağı)
+                var brakeHoldsForward = -AccelerationInput >= gravityAlongForward;
+                var brakeHoldsBackward = -AccelerationInput >= -gravityAlongForward;
+
                 // Can sleep?
                 var canSleepParkingShift = isAllWheelGrounded && isParkingShift;
-                var canSleepDriveShift = isAllWheelGrounded && isDriveShift && isZeroOrNegativeAcceleration && (isMinusSpeed || isUnderSleepVelocity);
-                var canSleepReverseShift = isAllWheelGrounded && isReverseShift && isZeroOrNegativeAcceleration && (isPlusSpeed || isUnderSleepVelocity);
+                var canSleepDriveShift = isAllWheelGrounded && isDriveShift && isZeroOrNegativeAcceleration && (isMinusSpeed || isUnderSleepVelocity) && brakeHoldsForward;
+                var canSleepReverseShift = isAllWheelGrounded && isReverseShift && isZeroOrNegativeAcceleration && (isPlusSpeed || isUnderSleepVelocity) && brakeHoldsBackward;
                 var canSleepNeutralShift = isAllWheelGrounded && isNeutralShift && isUnderSleepVelocity;
                 var canSleep = canSleepParkingShift || canSleepDriveShift || canSleepNeutralShift || canSleepReverseShift;
 

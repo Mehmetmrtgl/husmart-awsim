@@ -112,6 +112,8 @@ namespace Awsim.Usecase.TrafficSimulation
             var distanceToStopPointByTrafficLight = CalculateTrafficLightDistance(state, suddenStopDistance);
             var distanceToStopPointByRightOfWay = CalculateYieldingDistance(state);
             var distanceToStopPoint = Mathf.Min(distanceToStopPointByFrontVehicle, distanceToStopPointByTrafficLight, distanceToStopPointByRightOfWay);
+            // Beytepe: egoya yol verme noktası (BeytepeNpcEgoAwareness); yoksa float.MaxValue
+            distanceToStopPoint = Mathf.Min(distanceToStopPoint, state.DistanceToEgoYieldPoint);
 
             state.IsStoppedByFrontVehicle = false;
             if (distanceToStopPointByFrontVehicle <= stopDistance)

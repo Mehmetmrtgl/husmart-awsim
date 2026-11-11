@@ -1162,5 +1162,33 @@ namespace RGLUnityPlugin
                 new Laser {horizontalAngularOffsetDeg = 0.156f, verticalAngularOffsetDeg = 19.73f, ringId = 124, timeOffset = 0.030096f, minRange = 0.3f, maxRange = 80f},
             }
         };
+
+        // Hesai JT128 (Beytepe/Hüsmart eklemesi). Kaynak: Hesai JT128 broşürü ve ürün sayfası:
+        // 128 kanal, hiper-yarıküre görüş alanı 360° (Y) x 187° (D); dik (kubbe yukarı) takıldığında her azimutta
+        // yükseliş -3.5° .. +90° (2 x 93.5° = 187°), dikey çözünürlük ~0.74°, yatay 0.4°, 10 Hz, en fazla 60 m.
+        // Gerçek kanal açı dağılımı (açı düzeltme dosyası) elimizde olmadığından kanallar eşit aralıklı varsayıldı.
+        // RGL kuralı: verticalAngularOffsetDeg = -yükseliş (pozitif değer ışını aşağı eğer). Halka 0 = en alt kanal;
+        // Autoware ring_outlier_filter (max_rings_num 128) için halka numaraları 0..127.
+        public static LaserArray HesaiJT128
+        {
+            get
+            {
+                const int channels = 128;
+                const float minElevationDeg = -3.5f;
+                const float maxElevationDeg = 90.0f;
+                var lasers = new Laser[channels];
+                for (int i = 0; i < channels; i++)
+                {
+                    float elevation = minElevationDeg + i * (maxElevationDeg - minElevationDeg) / (channels - 1);
+                    lasers[i] = new Laser { verticalAngularOffsetDeg = -elevation, ringId = i, timeOffset = 0.0f, minRange = 0.1f, maxRange = 60.0f };
+                }
+                return new LaserArray
+                {
+                    centerOfMeasurementLinearOffsetMm = new Vector3(0.0f, 0.0f, 0.0f),
+                    focalDistanceMm = 0.0f,
+                    lasers = lasers,
+                };
+            }
+        }
     }
 }

@@ -1,0 +1,7 @@
+Dokular ambientCG.com kaynaklıdır, CC0 1.0 Universal (kamu malı) lisanslıdır.
+Asphalt: Asphalt033 (https://ambientcg.com/view?id=Asphalt033)
+ConcreteRoad: Concrete046 (https://ambientcg.com/view?id=Concrete046)
+ConcreteLight: Concrete049 (https://ambientcg.com/view?id=Concrete049)
+Grass: Grass004 (https://ambientcg.com/view?id=Grass004)
+Bark: Bark016 (https://ambientcg.com/view?id=Bark016)
+Leaves: LeafSet010 (https://ambientcg.com/view?id=LeafSet010)

@@ -139,11 +139,22 @@ namespace RGLUnityPlugin
             UpdateTransform();
         }
 
+        // Beytepe performance: most of the ~20k scene entities are static; re-sending an identical transform to RGL
+        // every lidar capture cost a native call per entity. Skip it when the matrix is exactly unchanged.
+        private Matrix4x4 lastSentLocalToWorld;
+        private bool hasSentLocalToWorld = false;
+
         protected virtual void UpdateTransform()
         {
             Assert.IsFalse(rglEntityPtr == IntPtr.Zero);
 
             Matrix4x4 m = GetLocalToWorld();
+            if (hasSentLocalToWorld && m.Equals(lastSentLocalToWorld))
+            {
+                return;
+            }
+            lastSentLocalToWorld = m;
+            hasSentLocalToWorld = true;
             float[] matrix3x4 =
             {
                 m.m00, m.m01, m.m02, m.m03,

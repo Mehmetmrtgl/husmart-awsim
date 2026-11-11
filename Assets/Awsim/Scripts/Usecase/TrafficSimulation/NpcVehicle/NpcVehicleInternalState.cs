@@ -70,6 +70,10 @@ namespace Awsim.Usecase.TrafficSimulation
         public NpcVehicleYieldPhase YieldPhase { get; set; }
         public Vector3 YieldPoint { get; set; }
 
+        // Beytepe: egoya yol verme noktasına uzaklık (m, NPC'nin önünden). Beytepe.Runtime.BeytepeNpcEgoAwareness yazar,
+        // NpcVehicleDecisionStep okur. float.MaxValue = yol verme yok.
+        public float DistanceToEgoYieldPoint { get; set; } = float.MaxValue;
+
         // Output from Decision
         public Vector3 TargetPoint { get; set; }
         public NpcVehicleSpeedMode SpeedMode { get; set; }

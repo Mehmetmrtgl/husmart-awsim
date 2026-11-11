@@ -189,6 +189,21 @@ namespace RGLUnityPlugin
                     verticalBeamDivergence = 0.13f, // Not specified in manual
                     highResolutionModeEnabled = false,
                 }},
+
+                // Beytepe/Hüsmart eklemesi: Hesai JT128 (ayrıntı: LaserArrayLibrary.HesaiJT128)
+                {LidarModel.HesaiJT128, () => new UniformRangeLidarConfiguration
+                {
+                    laserArray = LaserArrayLibrary.HesaiJT128,
+                    horizontalResolution = 0.4f,
+                    laserArrayCycleTime = 0.11111f,   // 100 ms / 900 atış (ms)
+                    minHAngle = 0.0f,
+                    maxHAngle = 360.0f,
+                    noiseParams = LidarNoiseParams.TypicalNoiseParams,
+                    minRange = 0.1f,
+                    maxRange = 60.0f,
+                    horizontalBeamDivergence = 0.13f, // datasheet'te verilmiyor
+                    verticalBeamDivergence = 0.13f,   // datasheet'te verilmiyor
+                }},
             };
     }
 }

@@ -65,6 +65,16 @@ namespace RGLUnityPlugin
         private HashSet<GameObject> lastFrameGameObjects = new HashSet<GameObject>();
         private readonly Dictionary<GameObject, IRGLObject> uploadedRGLObjects = new Dictionary<GameObject, IRGLObject>();
 
+        // Beytepe performance: the scene has ~55k GameObjects / ~20k meshes. Scanning all of them before every
+        // lidar capture (10 Hz) blocked the main thread for ~90 ms each time (stuttering + 100+ ms sensor latency).
+        // - The full add/remove scan runs at most every FullScanIntervalSec; in between only destroyed objects are dropped.
+        // - "Has a lidar/radar parent" is structural, so it is cached per GameObject.
+        // - Unchanged transforms are not re-sent to RGL (see RGLObject.UpdateTransform).
+        private const float FullScanIntervalSec = 0.3f;
+        private float lastFullScanTime = float.NegativeInfinity;
+        private readonly Dictionary<GameObject, bool> parentHasSensorCache = new Dictionary<GameObject, bool>();
+        private readonly List<GameObject> destroyedGOs = new List<GameObject>();
+
         // This dictionary keeps tracks of identifier -> instance id of objects that were removed (e.g. temporary NPCs)
         // This is needed to include them in the instance id dictionary yaml saved at the end of simulation.
         // Since categoryId can be changed in the runtime, this is filled only on object removal / simulation end.
@@ -153,9 +163,33 @@ namespace RGLUnityPlugin
 
             SynchronizeSceneTime();
 
+            if (Time.realtimeSinceStartup - lastFullScanTime < FullScanIntervalSec)
+            {
+                // Cheap path (Beytepe): no full scan; drop objects destroyed since the last one, then update poses.
+                Profiler.BeginSample("Remove destroyed objects (cheap path)");
+                destroyedGOs.Clear();
+                foreach (var kv in uploadedRGLObjects)
+                {
+                    if (kv.Key == null) destroyedGOs.Add(kv.Key);
+                }
+                foreach (var go in destroyedGOs)
+                {
+                    uploadedRGLObjects[go].DestroyInRGL();
+                    uploadedRGLObjects.Remove(go);
+                }
+                Profiler.EndSample();
+                UpdateUploadedObjects();
+                return;
+            }
+            lastFullScanTime = Time.realtimeSinceStartup;
+
             Profiler.BeginSample("Find changes and make TODO list");
-            var thisFrameGOs = new HashSet<GameObject>(FindObjectsOfType<GameObject>());
-            thisFrameGOs.RemoveWhere(IsNotActiveOrParentHasLidar);
+            var thisFrameGOs = new HashSet<GameObject>(FindObjectsByType<GameObject>(FindObjectsInactive.Exclude, FindObjectsSortMode.None));
+            thisFrameGOs.RemoveWhere(IsNotActiveOrParentHasLidarCached);
+            if (parentHasSensorCache.Count > 2 * thisFrameGOs.Count + 1000)
+            {
+                parentHasSensorCache.Clear();   // drop entries of destroyed objects (NPC churn)
+            }
 
             // Added
             var toAddGOs = new HashSet<GameObject>(thisFrameGOs);
@@ -195,15 +229,37 @@ namespace RGLUnityPlugin
             }
             Profiler.EndSample();
 
+            UpdateUploadedObjects();
+        }
+
+        private void UpdateUploadedObjects()
+        {
             // TODO(prybicki): This part can take up to 8ms on Shinjuku scene, two ideas to optimize it soon:
             // - Implement batch update in RGL
             // - Use Transform.hasChanged to filter out some objects
+            // (Beytepe: unchanged transforms are now skipped inside RGLObject.UpdateTransform.)
             Profiler.BeginSample("Update transforms and skinned meshes");
             foreach (var gameRGLObject in uploadedRGLObjects)
             {
                 gameRGLObject.Value.Update();
             }
             Profiler.EndSample();
+        }
+
+        private bool IsNotActiveOrParentHasLidarCached(GameObject gameObject)
+        {
+            if (!gameObject.activeInHierarchy)
+            {
+                return true;
+            }
+            if (!parentHasSensorCache.TryGetValue(gameObject, out bool hasSensorParent))
+            {
+                // Same check as IsNotActiveOrParentHasLidar (the object is active, so all its parents are active too).
+                hasSensorParent = gameObject.GetComponentInParent<LidarSensor>() != null ||
+                                  gameObject.GetComponentInParent<RadarSensor>() != null;
+                parentHasSensorCache[gameObject] = hasSensorParent;
+            }
+            return hasSensorParent;
         }
 
         private void SynchronizeSceneTime()
@@ -235,6 +291,8 @@ namespace RGLUnityPlugin
             BonesPoseCacheManager.Clear();
             uploadedRGLObjects.Clear();
             lastFrameGameObjects.Clear();
+            parentHasSensorCache.Clear();
+            lastFullScanTime = float.NegativeInfinity;   // next DoUpdate does a full scan
             Debug.Log("RGLSceneManager: cleared");
         }
 

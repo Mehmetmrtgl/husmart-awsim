@@ -1,3 +1,7 @@
+> [!NOTE]
+> **This fork (branch `beytepe`):** AWSIM with Hacettepe University's Beytepe campus and the Hüsmart vehicle's sensors (OT128 + 8 × JT128 lidars, ZED X, MTi-7).
+> Details: [`Assets/Beytepe/README.md`](Assets/Beytepe/README.md). Autoware side and how to run: [husmart-sim](https://github.com/Mehmetmrtgl/husmart-sim).
+
 > [!IMPORTANT]
 > AWSIM has been transferred from [TIER IV](https://github.com/tier4) to [Autoware Foundation](https://github.com/autowarefoundation/) GitHub Organization at 2026-05-07.
 

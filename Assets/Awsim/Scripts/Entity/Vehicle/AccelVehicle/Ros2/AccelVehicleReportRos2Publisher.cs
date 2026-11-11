@@ -129,7 +129,9 @@ namespace Awsim.Entity
             _turnIndicatorsReportMsg.Report = AccelVehicleRos2MsgConverter.UnityToRos2TurnIndicators(_vehicle.TurnIndicators);   // Turn indicators.
             _hazardLightsReportMsg.Report = AccelVehicleRos2MsgConverter.UnityToRos2HazardLights(_vehicle.HazardLights);         // Hazard lights.
             var rosLinearVelocity = Ros2Utility.UnityToRos2Position(_vehicle.LocalVelocity);                                // Velocity reports.
-            var rosAngularVelocity = Ros2Utility.UnityToRos2Position(_vehicle.AngularVelocity);
+            // [Beytepe düzeltmesi] Unity sol-el sistemi: açısal hız ROS'a işaret çevrilerek aktarılmalı
+            // (Ros2Utility.UnityToRos2AngularVelocity); gövde ekseninde (yokuşta da doğru heading_rate).
+            var rosAngularVelocity = Ros2Utility.UnityToRos2AngularVelocity(_vehicle.LocalAngularVelocity);
             _velocityReportMsg.Longitudinal_velocity = rosLinearVelocity.x;
             _velocityReportMsg.Lateral_velocity = rosLinearVelocity.y;
             _velocityReportMsg.Heading_rate = rosAngularVelocity.z;
