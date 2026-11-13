@@ -78,3 +78,4 @@ crashlytics-build.properties
 # Beytepe "gerçek dünya" denemesinin zemin karoları (0.5 GB, yalnız BEYTEPE_WORLD=gercek)
 /Assets/Beytepe/Model/Gercek/Zemin/
 /Assets/Beytepe/Model/Gercek/Zemin.meta
+/Assets/Beytepe/BeytepeSimulation.unity.meta
