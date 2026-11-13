@@ -26,7 +26,7 @@ using UnityEngine;
 
 namespace Beytepe.EditorTools
 {
-    public static class BeytepeSceneBuilder
+    public static partial class BeytepeSceneBuilder   // nizamiye yolu: BeytepeNizamiye.cs
     {
         const string SrcScene = "Assets/Awsim/Scenes/AutowareSimulationDemo.unity";
         const string DstScene = "Assets/Beytepe/BeytepeSimulation.unity";
@@ -1060,7 +1060,7 @@ namespace Beytepe.EditorTools
             if (okRatio < 0.6f)
                 L("UYARI: hizalama zayıf (<%60). Model ve harita aynı çerçevede olmayabilir; sahneyi kontrol edin.");
             if (World == "gercek") AddRealTrees(models);
-            else { AddBumps(models); AddBuildings(models, model); }
+            else { ApplyNizamiye(model, models); AddBumps(models); AddBuildings(models, model); }
             AddSky();
 
             // --- 5) MGRS ofseti = 0
@@ -1086,6 +1086,8 @@ namespace Beytepe.EditorTools
             egoT.rotation = Quaternion.Euler(0, -EgoRosYawDeg, 0);   // ROS yaw (CCW, x'ten) -> Unity Y (-yaw)
             L($"Ego: {egoT.name} Unity {start} (ROS {EgoRosPos.x},{EgoRosPos.y}, yaw {EgoRosYawDeg}°)");
             AddHusmartSensors(egoT, ego.transform);
+
+            if (World != "gercek") NizamiyeBulutYaz();   // nizamiye bölgesinin nokta bulutu (Autoware haritası için)
 
             // --- 7) kaydet
             EditorSceneManager.MarkSceneDirty(scene);
