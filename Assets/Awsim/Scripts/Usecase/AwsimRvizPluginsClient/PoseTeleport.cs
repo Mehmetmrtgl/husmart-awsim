@@ -64,9 +64,31 @@ namespace Awsim.Usecase.AwsimRvizPlugins
                 Vector3 rayOrigin = new Vector3(_position.x, 1000.0f, _position.z);
                 Vector3 rayDirection = Vector3.down;
 
-                if (Physics.Raycast(rayOrigin, rayDirection, out RaycastHit hit, Mathf.Infinity))
+                // [Beytepe fix] The first hit used to be the ego itself when it already stood at the target (a repeated
+                // teleport put the car on its own roof, ~3 m higher each time, and the long drop could break the vehicle
+                // physics). Skip the ego's own colliders and trigger volumes; take the nearest remaining surface.
+                bool found = false;
+                RaycastHit hit = default;
+                foreach (var h in Physics.RaycastAll(rayOrigin, rayDirection, Mathf.Infinity, ~0, QueryTriggerInteraction.Ignore))
                 {
-                    _transform.position = new Vector3(_position.x, hit.point.y + 1.33f, _position.z);
+                    if (h.collider.transform.IsChildOf(_transform)) continue;
+                    if (!found || h.distance < hit.distance) { hit = h; found = true; }
+                }
+
+                if (found)
+                {
+                    var position = new Vector3(_position.x, hit.point.y + 1.33f, _position.z);
+                    // [Beytepe fix] Stop the car. Before, it kept its old velocity: a car that had gone wild kept flying
+                    // after a teleport, and a falling car hit the ground faster.
+                    var rigidbody = _transform.GetComponent<Rigidbody>();
+                    if (rigidbody != null)
+                    {
+                        rigidbody.linearVelocity = Vector3.zero;
+                        rigidbody.angularVelocity = Vector3.zero;
+                        rigidbody.position = position;
+                        rigidbody.rotation = _rotation;
+                    }
+                    _transform.position = position;
                     _transform.transform.rotation = _rotation;
                 }
                 else

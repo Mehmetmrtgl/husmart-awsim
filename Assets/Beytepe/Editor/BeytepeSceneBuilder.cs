@@ -26,7 +26,7 @@ using UnityEngine;
 
 namespace Beytepe.EditorTools
 {
-    public static partial class BeytepeSceneBuilder   // nizamiye yolu: BeytepeNizamiye.cs
+    public static partial class BeytepeSceneBuilder   // nizamiye yolu + refüj: BeytepeDuzenleme.cs (Data/duzenlemeler.json)
     {
         const string SrcScene = "Assets/Awsim/Scenes/AutowareSimulationDemo.unity";
         const string DstScene = "Assets/Beytepe/BeytepeSimulation.unity";
@@ -719,6 +719,9 @@ namespace Beytepe.EditorTools
                 if (!b.ZeminiOlc()) nZem++;   // eğimli arazide zemin altında kalan pencereler çizilmez
                 b.Olustur();
             }
+            int nRep = 0;   // buildings replaced by a detailed gate model (BeytepeDuzenleme.cs AddBigBooth)
+            foreach (var b in bs) if (GateReplacedBuildings.Contains(b.osmKimlik)) { b.gameObject.SetActive(false); nRep++; }
+            if (nRep > 0) L($"Binalar: {nRep} bina nizamiye modeliyle değiştirildi, OSM hali gizlendi ({string.Join(", ", GateReplacedBuildings)})");
             Physics.SyncTransforms();
             var dets = bs.Where(b => b.detayli).ToList();
             L($"Binalar: cephe detayı {dets.Count} binada" + (dets.Count > 0 ? " (" + string.Join(", ", dets.Select(b =>
@@ -1060,7 +1063,7 @@ namespace Beytepe.EditorTools
             if (okRatio < 0.6f)
                 L("UYARI: hizalama zayıf (<%60). Model ve harita aynı çerçevede olmayabilir; sahneyi kontrol edin.");
             if (World == "gercek") AddRealTrees(models);
-            else { ApplyNizamiye(model, models); AddBumps(models); AddBuildings(models, model); }
+            else { ApplyDuzenlemeler(model, models); AddBumps(models); AddBuildings(models, model); }
             AddSky();
 
             // --- 5) MGRS ofseti = 0
@@ -1087,7 +1090,7 @@ namespace Beytepe.EditorTools
             L($"Ego: {egoT.name} Unity {start} (ROS {EgoRosPos.x},{EgoRosPos.y}, yaw {EgoRosYawDeg}°)");
             AddHusmartSensors(egoT, ego.transform);
 
-            if (World != "gercek") NizamiyeBulutYaz();   // nizamiye bölgesinin nokta bulutu (Autoware haritası için)
+            if (World != "gercek") DuzenlemeBulutYaz();   // nizamiye + refüj bölgesinin nokta bulutu (Autoware haritası için)
 
             // --- 7) kaydet
             EditorSceneManager.MarkSceneDirty(scene);
