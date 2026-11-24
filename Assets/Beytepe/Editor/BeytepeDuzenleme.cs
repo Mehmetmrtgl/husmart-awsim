@@ -45,11 +45,13 @@ namespace Beytepe.EditorTools
             public RefujLamba[] lambalar; public RefujAgac[] agaclar; public RefujAlan[] bulut_alanlari;
         }
         // RoadRunner marking recolouring: region + lanelet lines as segments (x0, y0, x1, y1, ...): solid -> yellow, dashed -> white
-        [Serializable] class CizgiRenkVeri { public float[] bolge_xy, sari_xy, beyaz_xy; }
+        // kenar_*_xy: edge lines with the road on their left, 5 floats per segment (ax ay bx by reach); alan: tour lanelet area rings (even-odd)
+        [Serializable] class CizgiHalka { public float[] xy; }
+        [Serializable] class CizgiRenkVeri { public float[] bolge_xy, sari_xy, beyaz_xy, kenar_sari_xy, kenar_beyaz_xy, sanal_xy; public CizgiHalka[] alan; public float oluk_cizgi_m; }
         // gate objects measured by hand (real lidar + ZED): barriers, flagpoles, kiosk, sign, generator, wall, guardrail, fence
         [Serializable] class NesneNokta { public string ad, bez, tur; public float x, y, kol_boy, boy, yuz_deg, yon_deg, en, derin, ust, boyut, cap, tac; public float[] renk; }
         [Serializable] class NesneDuvar { public string ad, tur; public float kalinlik; public float[] xy, boy; }
-        [Serializable] class NesneCizgi { public string ad; public float boy; public float[] xy; }
+        [Serializable] class NesneCizgi { public string ad; public float boy; public float[] xy; public string[] uclar; }   // uclar: end at first / last point ('gomulu' / 'duz')
         // big guard booth: body = rectangle + semicircular north end in a frame rotated by aci_deg (u across, v along);
         // openings: yuz dogu / bati (s from the south corner), guney (s from the west corner), yay (s = degrees from east)
         [Serializable] class KulubeAciklik { public string yuz, tur; public float s0, s1, alt, ust; }
@@ -64,13 +66,16 @@ namespace Beytepe.EditorTools
             public BuyukKulube[] buyuk_kulubeler;
             public NesneDuvar[] duvarlar; public NesneCizgi[] korkuluklar, citler;
         }
-        [Serializable] class DuzenlemeVeri { public string aciklama; public NizamiyeVeri nizamiye; public RefujVeri refuj; public CizgiRenkVeri cizgi_renk; public NesneVeri nesneler; }
+        // trees along the tour route (real lidar map): RoadRunner trees inside the corridor pieces (gizle) are replaced by these
+        [Serializable] class YolKenariVeri { public RefujAgac[] agaclar; public RefujAlan[] gizle; }
+        [Serializable] class DuzenlemeVeri { public string aciklama; public NizamiyeVeri nizamiye; public RefujVeri refuj; public CizgiRenkVeri cizgi_renk; public NesneVeri nesneler; public YolKenariVeri yol_kenari; }
 
         static DuzenlemeVeri LoadEdits() => File.Exists(EditDataPath) ? JsonUtility.FromJson<DuzenlemeVeri>(File.ReadAllText(EditDataPath)) : null;
         // JsonUtility fills a missing section with an empty object, so "present" means "has content"
         static bool Has(NizamiyeVeri n) => n != null && n.nx > 0 && n.ny > 0 && !string.IsNullOrEmpty(n.zemin_hedef);
         static bool Has(RefujVeri r) => r != null && r.sinir_xy != null && r.sinir_xy.Length >= 6;
         static bool Has(CizgiRenkVeri c) => c != null && c.bolge_xy != null && c.bolge_xy.Length >= 6;
+        static bool Has(YolKenariVeri k) => k != null && k.gizle != null && k.gizle.Length > 0;
         static int NLen<T>(T[] a) => a == null ? 0 : a.Length;
         static bool Has(NesneVeri n) => n != null && NLen(n.bariyerler) + NLen(n.bayraklar) + NLen(n.kulubeler) + NLen(n.tabelalar)
                                                      + NLen(n.kutular) + NLen(n.panolar) + NLen(n.cop_kutulari) + NLen(n.buyuk_kulubeler)
@@ -92,6 +97,7 @@ namespace Beytepe.EditorTools
             if (Has(d.nizamiye) && d.nizamiye.durak != null && d.nizamiye.durak.x != 0f) { Physics.SyncTransforms(); AddBusStop(d.nizamiye.durak, parent); }
             if (Has(d.cizgi_renk)) RecolorMarkings(model, d.cizgi_renk);
             if (Has(d.nesneler)) AddGateObjects(parent, d.nesneler); else L("Nizamiye nesneleri: veride bölüm yok, atlandı");
+            if (Has(d.yol_kenari)) AddRoadsideTrees(model, parent, d.yol_kenari); else L("Yol kenarı: veride bölüm yok, atlandı");
             FixTrees(model, parent, d);   // after the gate objects: a tree standing in the wall / fence is hidden
         }
 
@@ -185,6 +191,19 @@ namespace Beytepe.EditorTools
                 if (hasC) col.Add((col[i] + col[j]) * 0.5f);
                 foreach (var l in uvs) l.Add((l[i] + l[j]) * 0.5f);
                 mid[key] = m; return m;
+            }
+
+            // New vertex at fraction t on the edge i -> j (all attributes interpolated).
+            public int Lerp(int i, int j, float t)
+            {
+                int m = pos.Count;
+                pos.Add(Vector3.Lerp(pos[i], pos[j], t));
+                top.Add(Mathf.Lerp(top[i], top[j], t));
+                if (hasN) nrm.Add(Vector3.Lerp(nrm[i], nrm[j], t).normalized);
+                if (hasT) { var tt = Vector4.Lerp(tan[i], tan[j], t); tan.Add(new Vector4(tt.x, tt.y, tt.z, tan[i].w)); }
+                if (hasC) col.Add(Color.Lerp(col[i], col[j], t));
+                foreach (var l in uvs) l.Add(Vector4.Lerp(l[i], l[j], t));
+                return m;
             }
 
             // Split triangles into four until every edge is <= maxEdge, wherever need(a, b, c) (world corners) says so.
@@ -533,6 +552,25 @@ namespace Beytepe.EditorTools
             return best;
         }
 
+        // a guardrail post may not stand here: the top surface (gate objects ignored) is a RoadRunner road / sidewalk / curb /
+        // gutter / marking (edited meshes Refuj_ / Nizamiye_ / Kasis are not checked: the rails are measured off them)
+        static bool RailBlocked(Vector2 q)
+        {
+            var p = RosToUnity(new Vector3(q.x, q.y, 0f)); RaycastHit best = default; bool any = false;
+            foreach (var h in Physics.RaycastAll(new Vector3(p.x, 400f, p.z), Vector3.down, 800f, ~0, QueryTriggerInteraction.Ignore))
+            {
+                if (h.collider.name.StartsWith(GatePrefix)) continue;
+                if (!any || h.point.y > best.point.y) { best = h; any = true; }
+            }
+            if (!any) return false;
+            var n = best.collider.name;
+            if (n.StartsWith("Refuj_") || n.StartsWith("Nizamiye_") || n.StartsWith("Kasis")) return false;
+            var mat = HitMaterial(best);
+            if (mat != null) return IsRoadLikeMat(mat) || IsMarkingMat(mat);
+            var full = FullName(best.collider.transform);
+            return new[] { "Sidewalk", "Curb", "Gutter", "Marking", "Roads_Road" }.Any(k => full.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
         // lowest surface under a rectangle (centre, corners, edge midpoints); ax / ay = unit axes in ROS, hx / hy = half sizes
         static float GateGroundMin(Vector2 c, Vector2 ax, Vector2 ay, float hx, float hy)
         {
@@ -863,7 +901,7 @@ namespace Beytepe.EditorTools
             var mRed = GateMat("Kirmizi", new Color(0.80f, 0.07f, 0.07f), 0.45f, 0f);
             var mWhite = GateMat("Beyaz", new Color(0.93f, 0.93f, 0.92f), 0.45f, 0f);
             var mPole = GateMat("Direk", new Color(0.86f, 0.86f, 0.86f), 0.6f, 0.5f);
-            var mSteel = GateMat("Celik", new Color(0.70f, 0.72f, 0.74f), 0.5f, 0.7f);
+            var mSteel = GateMat("Celik", new Color(0.55f, 0.57f, 0.58f), 0.35f, 0.35f);   // galvanised: dull grey, as in the ZED frames
             var mFencePost = GateMat("CitDirek", new Color(0.30f, 0.36f, 0.30f), 0.35f, 0.3f);
             GameObject NewObj() { var g = new GameObject("parca"); g.transform.SetParent(gate, false); return g; }
 
@@ -1044,8 +1082,11 @@ namespace Beytepe.EditorTools
             if (NLen(n.duvarlar) > 0)
             {
                 var mStone = GateMat("TasDuvar", Color.white, 0.15f, 0f, GateTex("TasDuvar", 512, 256, StoneBlocks, false, true));
+                Material mConcrete = null;   // tur "beton": white painted concrete parapet (main road, y 1625..1682)
                 foreach (var w in n.duvarlar)
                 {
+                    var mW = mStone;
+                    if (w.tur == "beton") mW = mConcrete = mConcrete ?? GateMat("BetonDuvar", new Color(0.90f, 0.90f, 0.88f), 0.25f, 0f);
                     var P = XyList(w.xy); float T = w.kalinlik > 0f ? w.kalinlik : 0.4f;
                     var s0 = new List<float> { 0f }; for (int i = 1; i < P.Count; i++) s0.Add(s0[i - 1] + (P[i] - P[i - 1]).magnitude);
                     float total = s0[s0.Count - 1]; int ns = Mathf.Max(1, Mathf.CeilToInt(total / 1.0f));
@@ -1068,11 +1109,11 @@ namespace Beytepe.EditorTools
                         bb.Add(RosAt(q - nr * (T / 2f), yb)); bt.Add(RosAt(q - nr * (T / 2f), yt)); us.Add(s);
                     }
                     var o = NewObj();
-                    GStrip(o.transform, rb, rt, us, mStone, new Vector2(0.5f, 1f));
-                    GStrip(o.transform, bb, bt, us, mStone, new Vector2(0.5f, 1f));
-                    GStrip(o.transform, rt, bt, us, mStone, new Vector2(0.5f, 1f));
+                    GStrip(o.transform, rb, rt, us, mW, new Vector2(0.5f, 1f));
+                    GStrip(o.transform, bb, bt, us, mW, new Vector2(0.5f, 1f));
+                    GStrip(o.transform, rt, bt, us, mW, new Vector2(0.5f, 1f));
                     foreach (int e in new[] { 0, ns })
-                        GStrip(o.transform, new List<Vector3> { rb[e], bb[e] }, new List<Vector3> { rt[e], bt[e] }, new List<float> { 0f, T }, mStone, new Vector2(0.5f, 1f));
+                        GStrip(o.transform, new List<Vector3> { rb[e], bb[e] }, new List<Vector3> { rt[e], bt[e] }, new List<float> { 0f, T }, mW, new Vector2(0.5f, 1f));
                     GMerge(o, GatePrefix + "Duvar_" + w.ad); nObj++;
                 }
             }
@@ -1093,10 +1134,31 @@ namespace Beytepe.EditorTools
                 return l;
             }
 
-            // guardrail: posts every 2 m, W-beam rail 0.45..0.77 m on the road side (left of the drawing direction)
+            // guardrail: posts every 2 m, W-beam rail 0.45..0.77 m on the road side (left of the drawing direction).
+            // A post never stands on a RoadRunner road / sidewalk / curb / gutter / marking: it moves outwards (right of the
+            // drawing direction) in 0.25 m steps until the ground is soft (at most 4 m); the shift is the largest of +-2 posts,
+            // so a moved stretch stays a smooth line. End 'gomulu' (real terminals): the beam slopes down into the ground over
+            // 4 m, flared 0.3 m away from the road, with one short post half way.
+            int nRailMoved = 0;
             foreach (var r in n.korkuluklar ?? new NesneCizgi[0])
             {
                 var pts = Resample(r.xy, 2.0f, "korkuluk " + r.ad); if (pts.Count < 2) continue;
+                var shift = new float[pts.Count];
+                for (int i = 0; i < pts.Count; i++)
+                {
+                    var (q, _, d, _) = pts[i]; var nr = new Vector2(d.y, -d.x); float sh = 0f;
+                    while (sh < 4f && RailBlocked(q + nr * sh)) sh += 0.25f;
+                    shift[i] = sh >= 4f ? 0f : sh;
+                }
+                var moved = new List<(Vector2, float, Vector2, float)>(pts);
+                for (int i = 0; i < pts.Count; i++)
+                {
+                    float m = 0f; for (int j = Mathf.Max(0, i - 2); j <= Mathf.Min(pts.Count - 1, i + 2); j++) m = Mathf.Max(m, shift[j]);
+                    if (m <= 0f) continue;
+                    var (q, g, d, s) = pts[i]; var q2 = q + new Vector2(d.y, -d.x) * m; float g2 = GateGround(q2.x, q2.y);
+                    moved[i] = (q2, float.IsNaN(g2) ? g : g2, d, s); nRailMoved++;
+                }
+                pts = moved;
                 var o = NewObj();
                 for (int i = 0; i < pts.Count; i++)
                 {
@@ -1106,8 +1168,20 @@ namespace Beytepe.EditorTools
                     var (q0, g0, d0, _) = pts[i - 1]; var nl0 = new Vector2(-d0.y, d0.x) * 0.1f; var nl = new Vector2(-d.y, d.x) * 0.1f;
                     GBeam(o.transform, RosAt(q0 + nl0, g0 + 0.61f), RosAt(q + nl, g + 0.61f), 0.05f, 0.32f, mSteel);
                 }
+                for (int e = 0; e < 2; e++)
+                {
+                    string uc = r.uclar != null && r.uclar.Length == 2 ? r.uclar[e] : "gomulu";
+                    if (uc != "gomulu") continue;
+                    var (q, g, d, _) = e == 0 ? pts[0] : pts[pts.Count - 1];
+                    var outw = e == 0 ? -d : d; var nr = new Vector2(d.y, -d.x); var nl = -nr * 0.1f;
+                    var qe = q + outw * 4f + nr * 0.3f; float ge = GateGround(qe.x, qe.y); if (float.IsNaN(ge)) ge = g;
+                    var qm = q + outw * 2f + nr * 0.15f; float gm = GateGround(qm.x, qm.y); if (float.IsNaN(gm)) gm = g;
+                    GBeam(o.transform, RosAt(q + nl, g + 0.61f), RosAt(qe + nl, ge - 0.05f), 0.05f, 0.32f, mSteel);
+                    GBox(o.transform, RosAt(qm, gm - 0.05f), RosDir(d), new Vector3(0.12f, 0.6f, 0.08f), mSteel);
+                }
                 GMerge(o, GatePrefix + "Korkuluk_" + r.ad); nObj++;
             }
+            if (nRailMoved > 0) L($"Korkuluk: {nRailMoved} direk kaldırım / bordür / yol üstünden dışarı kaydırıldı");
 
             // wire fence: posts every 2.5 m, top rail, see-through mesh (alpha cut-out, 1 m texture tile)
             if (NLen(n.citler) > 0)
@@ -1216,55 +1290,7 @@ namespace Beytepe.EditorTools
             }
 
             // trees: RoadRunner templates (eucalyptus / bush) scaled to the measured height
-            int nT = 0, nB = 0;
-            if (d.agaclar != null && d.agaclar.Length > 0)
-            {
-                AssetDatabase.ImportAsset(FbxPath, ImportAssetOptions.ForceSynchronousImport);
-                var fbx = AssetDatabase.LoadAssetAtPath<GameObject>(FbxPath);
-                var tmp = (GameObject)PrefabUtility.InstantiatePrefab(fbx);
-                Transform Pick(string key, int minR, int maxR)
-                {
-                    foreach (var t in tmp.GetComponentsInChildren<Transform>(true))
-                    {
-                        if (t.name.IndexOf(key, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                        if (t.name.IndexOf("Leaves", StringComparison.OrdinalIgnoreCase) >= 0 || t.name.IndexOf("Trunk", StringComparison.OrdinalIgnoreCase) >= 0) continue;
-                        int n = t.GetComponentsInChildren<MeshRenderer>(true).Length;
-                        if (n >= minR && n <= maxR) return t;
-                    }
-                    return null;
-                }
-                (Quaternion rot, Vector3 scale, Vector3 baseOff, float height, float width) Measure(Transform t)
-                {
-                    var rs = t.GetComponentsInChildren<Renderer>(true);
-                    var b = rs[0].bounds; foreach (var rr in rs) b.Encapsulate(rr.bounds);
-                    var trunk = rs.FirstOrDefault(rr => rr.name.IndexOf("Trunk", StringComparison.OrdinalIgnoreCase) >= 0);
-                    var c = trunk != null ? trunk.bounds.center : b.center;
-                    return (t.rotation, t.lossyScale, new Vector3(c.x, b.min.y, c.z) - t.position, b.size.y, Mathf.Max(b.size.x, b.size.z));
-                }
-                var tTree = Pick("Eucalyptus", 2, 3); var tBush = Pick("Bush", 1, 2);
-                var mTree = tTree != null ? Measure(tTree) : default; var mBush = tBush != null ? Measure(tBush) : default;
-                var root = new GameObject("Refuj_Agaclar"); root.transform.SetParent(parent, false);
-                var rng = new System.Random(4242);
-                foreach (var a in d.agaclar)
-                {
-                    bool isTree = a.tur == "agac" || tBush == null;
-                    var tpl = isTree ? tTree : tBush; if (tpl == null) continue;
-                    var m = isTree ? mTree : mBush;
-                    var holder = new GameObject(isTree ? "agac" : "cali");
-                    holder.transform.SetParent(root.transform, false);
-                    holder.transform.position = RosToUnity(new Vector3(a.x, a.y, a.z));
-                    var copy = UnityEngine.Object.Instantiate(tpl.gameObject, holder.transform);
-                    var yaw = Quaternion.Euler(0f, (float)(rng.NextDouble() * 360.0), 0f);
-                    copy.transform.rotation = yaw * m.rot; copy.transform.localScale = m.scale;
-                    copy.transform.localPosition = -(yaw * m.baseOff);
-                    float s = Mathf.Clamp(a.boy / Mathf.Max(m.height, 0.1f), 0.2f, 6f);
-                    float sh = Mathf.Clamp(2f * a.tac / Mathf.Max(m.width, 0.1f), 0.6f * s, 1.6f * s);
-                    holder.transform.localScale = new Vector3(sh, s, sh);
-                    if (isTree) nT++; else nB++;
-                }
-                UnityEngine.Object.DestroyImmediate(tmp);
-                ApplyFallbackMaterials(root);
-            }
+            var (nT, nB) = InstantiateTrees(parent, "Refuj_Agaclar", d.agaclar, 4242);
 
             // two-arm lamps: white pole, two curved arms across the road direction, a head at each end
             int nL = 0;
@@ -1331,6 +1357,84 @@ namespace Beytepe.EditorTools
         // RoadRunner ground inside the median is lowered to 8 cm under the new curbs / grass wherever it pokes through
         // (it is never raised). Triangles touching the median are split to <= 1 m first so the edit stays local.
         const string SunkSuffix = "_refujalti";
+        // measured trees: RoadRunner templates (eucalyptus / bush) scaled to the measured height and crown, under one root
+        // ("Refuj_Agaclar" = median, "YolKenari_Agaclar" = along the tour route); FixTrees grounds them later
+        static (int nT, int nB) InstantiateTrees(Transform parent, string rootName, RefujAgac[] list, int seed)
+        {
+            int nT = 0, nB = 0;
+            if (list == null || list.Length == 0) return (0, 0);
+            AssetDatabase.ImportAsset(FbxPath, ImportAssetOptions.ForceSynchronousImport);
+            var fbx = AssetDatabase.LoadAssetAtPath<GameObject>(FbxPath);
+            var tmp = (GameObject)PrefabUtility.InstantiatePrefab(fbx);
+            Transform Pick(string key, int minR, int maxR)
+            {
+                foreach (var t in tmp.GetComponentsInChildren<Transform>(true))
+                {
+                    if (t.name.IndexOf(key, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (t.name.IndexOf("Leaves", StringComparison.OrdinalIgnoreCase) >= 0 || t.name.IndexOf("Trunk", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    int n = t.GetComponentsInChildren<MeshRenderer>(true).Length;
+                    if (n >= minR && n <= maxR) return t;
+                }
+                return null;
+            }
+            (Quaternion rot, Vector3 scale, Vector3 baseOff, float height, float width) Measure(Transform t)
+            {
+                var rs = t.GetComponentsInChildren<Renderer>(true);
+                var b = rs[0].bounds; foreach (var rr in rs) b.Encapsulate(rr.bounds);
+                var trunk = rs.FirstOrDefault(rr => rr.name.IndexOf("Trunk", StringComparison.OrdinalIgnoreCase) >= 0);
+                var c = trunk != null ? trunk.bounds.center : b.center;
+                return (t.rotation, t.lossyScale, new Vector3(c.x, b.min.y, c.z) - t.position, b.size.y, Mathf.Max(b.size.x, b.size.z));
+            }
+            var tTree = Pick("Eucalyptus", 2, 3); var tBush = Pick("Bush", 1, 2);
+            var mTree = tTree != null ? Measure(tTree) : default; var mBush = tBush != null ? Measure(tBush) : default;
+            var root = new GameObject(rootName); root.transform.SetParent(parent, false);
+            var rng = new System.Random(seed);
+            foreach (var a in list)
+            {
+                bool isTree = a.tur == "agac" || tBush == null;
+                var tpl = isTree ? tTree : tBush; if (tpl == null) continue;
+                var m = isTree ? mTree : mBush;
+                var holder = new GameObject(isTree ? "agac" : "cali");
+                holder.transform.SetParent(root.transform, false);
+                holder.transform.position = RosToUnity(new Vector3(a.x, a.y, a.z));
+                var copy = UnityEngine.Object.Instantiate(tpl.gameObject, holder.transform);
+                var yaw = Quaternion.Euler(0f, (float)(rng.NextDouble() * 360.0), 0f);
+                copy.transform.rotation = yaw * m.rot; copy.transform.localScale = m.scale;
+                copy.transform.localPosition = -(yaw * m.baseOff);
+                float s = Mathf.Clamp(a.boy / Mathf.Max(m.height, 0.1f), 0.2f, 6f);
+                float sh = Mathf.Clamp(2f * a.tac / Mathf.Max(m.width, 0.1f), 0.6f * s, 1.6f * s);
+                holder.transform.localScale = new Vector3(sh, s, sh);
+                if (isTree) nT++; else nB++;
+            }
+            UnityEngine.Object.DestroyImmediate(tmp);
+            ApplyFallbackMaterials(root);
+            return (nT, nB);
+        }
+
+        // ================= trees along the tour route =================
+        // The real lidar map shows the trees beside the route (tools/beytepe_duzenle "kenar-tespit"). Inside the corridor pieces
+        // the RoadRunner eucalyptus trees (random placement) are hidden and the measured trees are placed instead; RoadRunner
+        // bushes stay (hedges are not measured). FixTrees then grounds the new trees and hides any that stand on a road,
+        // sidewalk or curb; AddBuildings hides those inside a building.
+        public const string RoadsideTreeRoot = "YolKenari_Agaclar";
+        static void AddRoadsideTrees(GameObject model, Transform parent, YolKenariVeri d)
+        {
+            var masks = d.gizle.Select(a => new PolyMaske(XyList(a.xy), 0.25f)).ToList();
+            int nHidden = 0;
+            foreach (var t in model.GetComponentsInChildren<Transform>(true))
+            {
+                var nm = t.name;
+                if (!nm.StartsWith("Eucalyptus_") || !nm.EndsWith("Node")) continue;
+                if (t.parent != null && (t.parent.name.StartsWith("Bush_") || t.parent.name.StartsWith("Eucalyptus_"))) continue;
+                if (!t.gameObject.activeSelf) continue;
+                var tb = TreeBase(t, null); if (tb == null) continue;
+                var r = UnityToRos(tb.Value.c);
+                if (masks.Any(m => m.In(r.x, r.y))) { t.gameObject.SetActive(false); nHidden++; }
+            }
+            var (nT, nB) = InstantiateTrees(parent, RoadsideTreeRoot, d.agaclar, 777);
+            L($"Yol kenarı: {d.gizle.Length} koridor parçası; {nHidden} RoadRunner ağacı gizlendi, {nT} ölçülmüş ağaç + {nB} çalı eklendi");
+        }
+
         static List<List<Vector2>> IslandRings(RefujVeri d)
         {
             var l = new List<List<Vector2>> { XyList(d.sinir_xy) };
@@ -1461,7 +1565,7 @@ namespace Beytepe.EditorTools
                 if (t.gameObject.activeInHierarchy) trees.Add(t);
             }
             int nRR = trees.Count;
-            foreach (var root in parent.GetComponentsInChildren<Transform>(true).Where(x => x.name == "Refuj_Agaclar"))
+            foreach (var root in parent.GetComponentsInChildren<Transform>(true).Where(x => x.name == "Refuj_Agaclar" || x.name == RoadsideTreeRoot))
                 foreach (Transform h in root) if (h.gameObject.activeInHierarchy) trees.Add(h);
 
             var buf = new List<Vector3>(4096);
@@ -1513,6 +1617,7 @@ namespace Beytepe.EditorTools
         // RoadRunner drew the median road's lines the other way round (dashed lane line yellow, edge lines white). Each
         // marking triangle in the region takes the colour of the lanelet line it lies on (within 0.6 m and running along it):
         // solid -> yellow, dashed -> white. Other markings (crosswalks, arrows, stop lines) do not run along a line: unchanged.
+        // Then: yellow line pieces through junctions (virtual lanelet borders) -> white, and the campus gutters (see below).
         static void RecolorMarkings(GameObject model, CizgiRenkVeri r)
         {
             bool Yellow(string n) => n.IndexOf("Yellow", StringComparison.OrdinalIgnoreCase) >= 0;
@@ -1549,7 +1654,64 @@ namespace Beytepe.EditorTools
                 }
                 return res;
             }
-            int nMesh = 0, nToW = 0, nToY = 0, nSame = 0, nOther = 0;
+            // edge lines, turned so that the road is on their left (for the gutter pass below)
+            var esegs = new List<(Vector2 a, Vector2 b, bool yellow)>();
+            void AddE(float[] f, bool y) { if (f != null) for (int i = 0; i + 3 < f.Length; i += 4) esegs.Add((new Vector2(f[i], f[i + 1]), new Vector2(f[i + 2], f[i + 3]), y)); }
+            AddE(r.kenar_sari_xy, true); AddE(r.kenar_beyaz_xy, false);
+            const float gD = 1.2f;   // a gutter strip lies within this distance of the lanelet edge (either side)
+            var egrid = new Dictionary<long, List<int>>();
+            for (int k = 0; k < esegs.Count; k++)
+            {
+                var (a, b, _) = esegs[k];
+                int i0 = Mathf.FloorToInt((Mathf.Min(a.x, b.x) - gD) / C), i1 = Mathf.FloorToInt((Mathf.Max(a.x, b.x) + gD) / C);
+                int j0 = Mathf.FloorToInt((Mathf.Min(a.y, b.y) - gD) / C), j1 = Mathf.FloorToInt((Mathf.Max(a.y, b.y) + gD) / C);
+                for (int i = i0; i <= i1; i++) for (int j = j0; j <= j1; j++)
+                    { if (!egrid.TryGetValue(Key(i, j), out var l)) egrid[Key(i, j)] = l = new List<int>(); l.Add(k); }
+            }
+            float Side(int k, Vector2 p) { var (a, b, _) = esegs[k]; var u = (b - a).normalized; return u.x * (p.y - a.y) - u.y * (p.x - a.x); }   // > 0: road side
+            int EdgeSeg(Vector2 p, Vector2 dir)   // nearest edge segment running along dir (zero: any direction) within gD, -1: none
+            {
+                if (!egrid.TryGetValue(Key(Mathf.FloorToInt(p.x / C), Mathf.FloorToInt(p.y / C)), out var l)) return -1;
+                float best = gD; int res = -1;
+                foreach (var k in l)
+                {
+                    var (a, b, _) = esegs[k]; var ab = b - a; float L = ab.magnitude; if (L < 1e-3f) continue;
+                    var u = ab / L; float t = Vector2.Dot(p - a, u);
+                    if (t < -0.3f || t > L + 0.3f || (dir != Vector2.zero && Mathf.Abs(Vector2.Dot(dir, u)) < 0.8f)) continue;
+                    float side = Mathf.Abs(Side(k, p));
+                    if (side < best) { best = side; res = k; }
+                }
+                return res;
+            }
+            // third pass: yellow line pieces inside the tour lanelet area (junctions with virtual lanelet borders) -> white
+            var areaMasks = (r.alan ?? new CizgiHalka[0]).Where(h => h.xy != null && h.xy.Length >= 6).Select(h => new PolyMaske(XyList(h.xy), 0.5f)).ToList();
+            bool InArea(Vector2 p) { int n = 0; foreach (var m in areaMasks) if (m.In(p.x, p.y)) n++; return (n & 1) == 1; }
+            // ... only if the piece runs along the road: parallel to the nearest lanelet line (virtual junction borders too) within 5 m
+            const float dirD = 5f;
+            var dsegs = segs.Select(s => (s.a, s.b)).ToList();
+            if (r.sanal_xy != null) for (int i = 0; i + 3 < r.sanal_xy.Length; i += 4) dsegs.Add((new Vector2(r.sanal_xy[i], r.sanal_xy[i + 1]), new Vector2(r.sanal_xy[i + 2], r.sanal_xy[i + 3])));
+            var dgrid = new Dictionary<long, List<int>>();
+            for (int k = 0; k < dsegs.Count; k++)
+            {
+                var (a, b) = dsegs[k];
+                int i0 = Mathf.FloorToInt((Mathf.Min(a.x, b.x) - dirD) / C), i1 = Mathf.FloorToInt((Mathf.Max(a.x, b.x) + dirD) / C);
+                int j0 = Mathf.FloorToInt((Mathf.Min(a.y, b.y) - dirD) / C), j1 = Mathf.FloorToInt((Mathf.Max(a.y, b.y) + dirD) / C);
+                for (int i = i0; i <= i1; i++) for (int j = j0; j <= j1; j++)
+                    { if (!dgrid.TryGetValue(Key(i, j), out var l)) dgrid[Key(i, j)] = l = new List<int>(); l.Add(k); }
+            }
+            bool AlongRoad(Vector2 p, Vector2 dir)
+            {
+                if (!dgrid.TryGetValue(Key(Mathf.FloorToInt(p.x / C), Mathf.FloorToInt(p.y / C)), out var l)) return false;
+                float best = dirD; Vector2 bu = Vector2.zero;
+                foreach (var k in l)
+                {
+                    var (a, b) = dsegs[k]; var ab = b - a; float L2 = ab.sqrMagnitude; if (L2 < 1e-6f) continue;
+                    float t = Mathf.Clamp01(Vector2.Dot(p - a, ab) / L2); float dd = Vector2.Distance(a + t * ab, p);
+                    if (dd < best) { best = dd; bu = ab / Mathf.Sqrt(L2); }
+                }
+                return best < dirD && Mathf.Abs(Vector2.Dot(dir, bu)) >= 0.8f;
+            }
+            int nMesh = 0, nToW = 0, nToY = 0, nSame = 0, nOther = 0, nArea3 = 0;
             foreach (var mf in TerrainMeshes(model, box))
             {
                 var mr = mf.GetComponent<MeshRenderer>(); var mats = mr.sharedMaterials.ToList();
@@ -1575,6 +1737,9 @@ namespace Beytepe.EditorTools
                             Vector2 e1 = new Vector2(rb.x - ra.x, rb.y - ra.y), e2 = new Vector2(rc.x - rb.x, rc.y - rb.y), e3 = new Vector2(ra.x - rc.x, ra.y - rc.y);
                             var e = e1.sqrMagnitude >= e2.sqrMagnitude && e1.sqrMagnitude >= e3.sqrMagnitude ? e1 : (e2.sqrMagnitude >= e3.sqrMagnitude ? e2 : e3);
                             if (e.sqrMagnitude > 1e-6f) target = Nearest(c, e.normalized);
+                            // line-like triangle (narrower than 0.3 m across its longest edge; crosswalk bars are ~0.5 m)
+                            float width = e.sqrMagnitude > 1e-6f ? Mathf.Abs(e1.x * e2.y - e1.y * e2.x) / e.magnitude : 1f;
+                            if (target < 0 && width < 0.3f && isY && InArea(c) && AlongRoad(c, e.normalized)) { target = 0; nArea3++; }
                             if (target < 0) nOther++;
                         }
                         if (target < 0 || (target == 1) == isY) { if (target >= 0) nSame++; keep.Add(t[k]); keep.Add(t[k + 1]); keep.Add(t[k + 2]); continue; }
@@ -1587,7 +1752,126 @@ namespace Beytepe.EditorTools
                 em.Commit("_renk", null, mats);
                 nMesh++; nToW += toW.Count / 3; nToY += toY.Count / 3;
             }
-            L($"Çizgi renkleri: {nMesh} mesh, {nToW} üçgen sarıdan beyaza, {nToY} üçgen beyazdan sarıya; {nSame} üçgen zaten doğru renkte, {nOther} çizgi üçgeni bir şerit çizgisine oturmadı (geçit/ok vb., dokunulmadı)");
+            L($"Çizgi renkleri: {nMesh} mesh, {nToW} üçgen sarıdan beyaza, {nToY} üçgen beyazdan sarıya; {nSame} üçgen zaten doğru renkte, {nOther} çizgi üçgeni bir şerit çizgisine oturmadı (geçit/ok vb., dokunulmadı); kavşak içi sarı -> beyaz: {nArea3} üçgen ({areaMasks.Count} alan halkası)");
+
+            // gutters: on the campus roads RoadRunner has no painted edge line but a light concrete gutter strip (~0.5 m) along
+            // the curb; the real road has asphalt there and a yellow line by the curb. Gutter triangles running along a tour edge
+            // become asphalt, and the strip's road-side band (oluk_cizgi_m wide, from its road-side boundary = the largest offset
+            // toward the road among the strip vertices on that edge segment) takes the edge colour. Triangles are cut, not moved.
+            var matA = FindModelMaterial(model, n => n.IndexOf("Asphalt", StringComparison.OrdinalIgnoreCase) >= 0);
+            float bandW = r.oluk_cizgi_m > 0f ? r.oluk_cizgi_m : 0.15f;
+            int gMesh = 0, gTri = 0, gY = 0, gW = 0, gA = 0, gAxis = 0, gClosed = 0, gLeft = 0;
+            const float pR = 1.5f;   // radius of the gutter neighbourhood that gives a short piece its direction
+            bool Gut(Material m) => m != null && m.name.IndexOf("Gutter", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (matA == null) L("UYARI: Çizgi renkleri: asfalt malzemesi bulunamadı, oluklar atlandı");
+            else foreach (var mf in TerrainMeshes(model, box))
+            {
+                var mr = mf.GetComponent<MeshRenderer>(); var mats = mr.sharedMaterials.ToList();
+                if (!mats.Any(Gut)) continue;
+                var em = new DuzenlenenMesh(mf, null);
+                Vector2 R2(int v) { var w = UnityToRos(em.W(v)); return new Vector2(w.x, w.y); }
+                long PK(Vector2 p) => ((long)Mathf.RoundToInt(p.x * 100f) << 32) ^ (uint)Mathf.RoundToInt(p.y * 100f);   // 1 cm position key
+                // the gutter corners of this mesh (each position once) in a pR grid
+                var gv = new Dictionary<long, List<Vector2>>(); var seen = new HashSet<long>();
+                for (int s = 0; s < em.tris.Length && s < mats.Count; s++)
+                {
+                    if (!Gut(mats[s])) continue;
+                    foreach (var vi in em.tris[s])
+                    {
+                        var p = R2(vi); if (!seen.Add(PK(p))) continue;
+                        var kk = Key(Mathf.FloorToInt(p.x / pR), Mathf.FloorToInt(p.y / pR));
+                        if (!gv.TryGetValue(kk, out var l)) gv[kk] = l = new List<Vector2>(); l.Add(p);
+                    }
+                }
+                // principal axis of the gutter corners within pR of c (false: none clear, the larger spread under 4x the smaller)
+                bool Axis(Vector2 c, out Vector2 dir)
+                {
+                    dir = Vector2.zero; int ci = Mathf.FloorToInt(c.x / pR), cj = Mathf.FloorToInt(c.y / pR);
+                    var q = new List<Vector2>();
+                    for (int i = ci - 1; i <= ci + 1; i++) for (int j = cj - 1; j <= cj + 1; j++)
+                        if (gv.TryGetValue(Key(i, j), out var l)) foreach (var p in l) if ((p - c).sqrMagnitude <= pR * pR) q.Add(p);
+                    if (q.Count < 3) return false;
+                    var mean = Vector2.zero; foreach (var p in q) mean += p; mean /= q.Count;
+                    float sxx = 0f, sxy = 0f, syy = 0f;
+                    foreach (var p in q) { var d = p - mean; sxx += d.x * d.x; sxy += d.x * d.y; syy += d.y * d.y; }
+                    float tr = sxx + syy, det = sxx * syy - sxy * sxy, disc = Mathf.Sqrt(Mathf.Max(0f, tr * tr / 4f - det));
+                    float l1 = tr / 2f + disc, l2 = tr / 2f - disc;
+                    if (l1 < 4f * Mathf.Max(l2, 1e-9f)) return false;
+                    dir = Mathf.Abs(sxy) > 1e-9f ? new Vector2(l1 - syy, sxy).normalized : (sxx >= syy ? Vector2.right : Vector2.up);
+                    return true;
+                }
+                // a gutter piece runs along an edge if its longest edge does; short pieces on curves and at crossings (~0.2 x 0.5 m,
+                // the longest edge runs across or diagonally) take the local direction of the strip (principal axis) instead
+                var hits = new List<(int s, int k, int seg)>(); var nearOnly = new List<(int s, int k, int seg)>();
+                for (int s = 0; s < em.tris.Length && s < mats.Count; s++)
+                {
+                    if (!Gut(mats[s])) continue;
+                    var t = em.tris[s];
+                    for (int k = 0; k + 2 < t.Count; k += 3)
+                    {
+                        Vector2 pa = R2(t[k]), pb = R2(t[k + 1]), pc = R2(t[k + 2]); var c = (pa + pb + pc) / 3f;
+                        if (!mask.In(c.x, c.y)) continue;
+                        Vector2 e1 = pb - pa, e2 = pc - pb, e3 = pa - pc;
+                        var e = e1.sqrMagnitude >= e2.sqrMagnitude && e1.sqrMagnitude >= e3.sqrMagnitude ? e1 : (e2.sqrMagnitude >= e3.sqrMagnitude ? e2 : e3);
+                        if (e.sqrMagnitude < 1e-4f) continue;
+                        int seg = EdgeSeg(c, e.normalized);
+                        if (seg < 0 && Axis(c, out var ax)) { seg = EdgeSeg(c, ax); if (seg >= 0) gAxis++; }
+                        if (seg >= 0) hits.Add((s, k, seg));
+                        else { int ns = EdgeSeg(c, Vector2.zero); if (ns >= 0) nearOnly.Add((s, k, ns)); }
+                    }
+                }
+                // holes: a piece by an edge whose direction is still unclear is cut too if it shares two corners with cut pieces
+                for (int it = 0; it < 2 && nearOnly.Count > 0; it++)
+                {
+                    var acc = new HashSet<long>();
+                    foreach (var (s, k, _) in hits) for (int q = 0; q < 3; q++) acc.Add(PK(R2(em.tris[s][k + q])));
+                    var rest = new List<(int s, int k, int seg)>();
+                    foreach (var h in nearOnly)
+                    {
+                        int n = 0; for (int q = 0; q < 3; q++) if (acc.Contains(PK(R2(em.tris[h.s][h.k + q])))) n++;
+                        if (n >= 2) { hits.Add(h); gClosed++; } else rest.Add(h);
+                    }
+                    nearOnly = rest;
+                }
+                gLeft += nearOnly.Count;
+                if (hits.Count == 0) continue;
+                var inner = new Dictionary<int, float>();
+                foreach (var (s, k, seg) in hits)
+                {
+                    var t = em.tris[s];
+                    float m = Mathf.Max(Side(seg, R2(t[k])), Mathf.Max(Side(seg, R2(t[k + 1])), Side(seg, R2(t[k + 2]))));
+                    inner[seg] = inner.TryGetValue(seg, out var o) ? Mathf.Max(o, m) : m;
+                }
+                var toY = new List<int>(); var toW = new List<int>(); var toA = new List<int>();
+                foreach (var (s, k, seg) in hits)
+                {
+                    var t = em.tris[s]; int[] v = { t[k], t[k + 1], t[k + 2] };
+                    float s0 = inner[seg] - bandW;
+                    var f = v.Select(i => Side(seg, R2(i)) - s0).ToArray();   // >= 0: inside the band
+                    var pin = new List<int>(4); var pout = new List<int>(4);
+                    for (int q = 0; q < 3; q++)
+                    {
+                        int a = v[q], b = v[(q + 1) % 3]; float fa = f[q], fb = f[(q + 1) % 3];
+                        (fa >= 0f ? pin : pout).Add(a);
+                        if ((fa >= 0f) != (fb >= 0f)) { int mv = em.Lerp(a, b, fa / (fa - fb)); pin.Add(mv); pout.Add(mv); }
+                    }
+                    var band = esegs[seg].yellow ? toY : toW;
+                    for (int q = 1; q + 1 < pin.Count; q++) band.AddRange(new[] { pin[0], pin[q], pin[q + 1] });
+                    for (int q = 1; q + 1 < pout.Count; q++) toA.AddRange(new[] { pout[0], pout[q], pout[q + 1] });
+                }
+                foreach (var g in hits.GroupBy(h => h.s))
+                {
+                    var drop = new HashSet<int>(g.Select(h => h.k)); var t = em.tris[g.Key]; var keep = new List<int>(t.Count);
+                    for (int k = 0; k + 2 < t.Count; k += 3) if (!drop.Contains(k)) { keep.Add(t[k]); keep.Add(t[k + 1]); keep.Add(t[k + 2]); }
+                    em.tris[g.Key] = keep;
+                }
+                int yI = mats.FindIndex(m => m != null && m.name == matY.name), wI = mats.FindIndex(m => m != null && m.name == matW.name);
+                int aI = mats.FindIndex(m => m != null && m.name == matA.name);
+                em.AddTo(mats, ref yI, matY, toY); em.AddTo(mats, ref wI, matW, toW); em.AddTo(mats, ref aI, matA, toA);
+                em.Commit("_oluk", null, mats);
+                gMesh++; gTri += hits.Count; gY += toY.Count / 3; gW += toW.Count / 3; gA += toA.Count / 3;
+            }
+            L($"Çizgi renkleri, oluklar: {gMesh} mesh, tur kenarı boyunca {gTri} oluk üçgeni kesildi (yönü çevredeki oluktan {gAxis}, boşluk doldurma {gClosed}; kenarda kalan {gLeft}) -> {gA} asfalt, {gY} sarı / {gW} beyaz kenar çizgisi üçgeni (çizgi {bandW:F2} m)");
         }
 
         // ================= point cloud of the edited regions =================
@@ -1618,7 +1902,18 @@ namespace Beytepe.EditorTools
             float x0 = regs.SelectMany(r => r).Min(p => p.x), x1 = regs.SelectMany(r => r).Max(p => p.x);
             float y0 = regs.SelectMany(r => r).Min(p => p.y), y1 = regs.SelectMany(r => r).Max(p => p.y);
             var box = RosBox(x0, x1, y0, y1);
-            bool In(Vector3 ros) { var p2 = new Vector2(ros.x, ros.y); foreach (var r in regs) if (InPoly(p2, r)) return true; return false; }
+            var rbox = regs.Select(r => (x0: r.Min(p => p.x), x1: r.Max(p => p.x), y0: r.Min(p => p.y), y1: r.Max(p => p.y))).ToList();
+            bool In(Vector3 ros)
+            {
+                var p2 = new Vector2(ros.x, ros.y);
+                for (int i = 0; i < regs.Count; i++)
+                {
+                    var bb = rbox[i];
+                    if (p2.x < bb.x0 || p2.x > bb.x1 || p2.y < bb.y0 || p2.y > bb.y1) continue;
+                    if (InPoly(p2, regs[i])) return true;
+                }
+                return false;
+            }
             var ego = UnityEngine.Object.FindFirstObjectByType<Awsim.Scene.AutowareSimulationDemo.EgoVehicle>();
             var rnd = new System.Random(12345);
             var outPts = new List<Vector3>(1000000); int nObj = 0, nSkip = 0;

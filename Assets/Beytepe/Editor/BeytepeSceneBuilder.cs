@@ -758,6 +758,18 @@ namespace Beytepe.EditorTools
                         if (Near(pt, polys[k])) { t.gameObject.SetActive(false); nTree++; break; }
                     }
                 }
+            // measured roadside trees (BeytepeDuzenleme.AddRoadsideTrees): the real tree may stand where the OSM footprint is offset
+            foreach (var root in parent.GetComponentsInChildren<Transform>(true).Where(x => x.name == RoadsideTreeRoot))
+                foreach (Transform t in root)
+                {
+                    if (!t.gameObject.activeSelf) continue;
+                    var pt = new Vector2(t.position.x, t.position.z);
+                    for (int k = 0; k < polys.Count; k++)
+                    {
+                        if (pt.x < boxes[k].mn.x || pt.y < boxes[k].mn.y || pt.x > boxes[k].mx.x || pt.y > boxes[k].mx.y) continue;
+                        if (Near(pt, polys[k])) { t.gameObject.SetActive(false); nTree++; break; }
+                    }
+                }
             L($"Binalar: {bs.Length} bina sahnede (yeni {nNew + nAdd}, atlanan {nSkip}); bina içinde kalan {nTree} ağaç/çalı gizlendi");
             if (_skipNote.Count > 0) L("  atlanan binalar: " + string.Join(", ", _skipNote));
             if (_nearNote.Count > 0) L($"  zemin modeli dışında, en yakın zemine oturtulan {_nearNote.Count} bina: " + string.Join(", ", _nearNote));
