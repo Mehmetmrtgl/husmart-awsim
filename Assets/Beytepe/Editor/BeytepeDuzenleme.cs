@@ -36,7 +36,7 @@ namespace Beytepe.EditorTools
             public NizamiyeDurak durak; public float[] bulut_kutu; public float bulut_yogunluk;
         }
         [Serializable] class RefujLamba { public string ad; public float x, y, z, yol_yonu_deg, boy, kol; }
-        [Serializable] class RefujAgac { public string tur; public float x, y, z, boy, tac; }
+        [Serializable] class RefujAgac { public string tur; public float x, y, z, boy, tac; public bool kirp; }   // kirp: crown cut to stay off the lanes
         [Serializable] class RefujAlan { public float[] xy; }
         [Serializable] class RefujVeri
         {
@@ -68,7 +68,11 @@ namespace Beytepe.EditorTools
         }
         // trees along the tour route (real lidar map): RoadRunner trees inside the corridor pieces (gizle) are replaced by these
         [Serializable] class YolKenariVeri { public RefujAgac[] agaclar; public RefujAlan[] gizle; }
-        [Serializable] class DuzenlemeVeri { public string aciklama; public NizamiyeVeri nizamiye; public RefujVeri refuj; public CizgiRenkVeri cizgi_renk; public NesneVeri nesneler; public YolKenariVeri yol_kenari; }
+        // road-surface repair zones (bd/yol_duzelt.py): grids of the smoothed road surface (hedef, -999 = none) and of the height
+        // change of the top road surface (delta), float32 base64, row-major from (x0, y0), cell centres at x0 + (i + 0.5) r
+        [Serializable] class YolDuzeltBolge { public string ad, hedef, delta; public float x0, y0, cozunurluk; public int nx, ny; }
+        [Serializable] class YolDuzeltVeri { public YolDuzeltBolge[] bolgeler; }
+        [Serializable] class DuzenlemeVeri { public string aciklama; public NizamiyeVeri nizamiye; public RefujVeri refuj; public CizgiRenkVeri cizgi_renk; public NesneVeri nesneler; public YolKenariVeri yol_kenari; public YolDuzeltVeri yol_duzelt; }
 
         static DuzenlemeVeri LoadEdits() => File.Exists(EditDataPath) ? JsonUtility.FromJson<DuzenlemeVeri>(File.ReadAllText(EditDataPath)) : null;
         // JsonUtility fills a missing section with an empty object, so "present" means "has content"
@@ -76,6 +80,7 @@ namespace Beytepe.EditorTools
         static bool Has(RefujVeri r) => r != null && r.sinir_xy != null && r.sinir_xy.Length >= 6;
         static bool Has(CizgiRenkVeri c) => c != null && c.bolge_xy != null && c.bolge_xy.Length >= 6;
         static bool Has(YolKenariVeri k) => k != null && k.gizle != null && k.gizle.Length > 0;
+        static bool Has(YolDuzeltVeri y) => y != null && y.bolgeler != null && y.bolgeler.Length > 0;
         static int NLen<T>(T[] a) => a == null ? 0 : a.Length;
         static bool Has(NesneVeri n) => n != null && NLen(n.bariyerler) + NLen(n.bayraklar) + NLen(n.kulubeler) + NLen(n.tabelalar)
                                                      + NLen(n.kutular) + NLen(n.panolar) + NLen(n.cop_kutulari) + NLen(n.buyuk_kulubeler)
@@ -92,6 +97,8 @@ namespace Beytepe.EditorTools
             if (model == null) return;
             var d = LoadEdits();
             if (d == null) { L("Düzenlemeler: veri yok (" + EditDataPath + "), RoadRunner modeli olduğu gibi kaldı"); return; }
+            // first: every later edit (gate, median, trees) measures the ground by raycasts and must see the repaired road
+            if (Has(d.yol_duzelt)) ApplyYolDuzelt(model, d.yol_duzelt); else L("Yol düzeltme: veride bölüm yok, atlandı");
             if (Has(d.nizamiye)) ApplyNizamiye(model, parent, d.nizamiye); else L("Nizamiye: veride bölüm yok, atlandı");
             if (Has(d.refuj)) ApplyRefuj(model, parent, d.refuj); else L("Refüj: veride bölüm yok, atlandı");
             if (Has(d.nizamiye) && d.nizamiye.durak != null && d.nizamiye.durak.x != 0f) { Physics.SyncTransforms(); AddBusStop(d.nizamiye.durak, parent); }
@@ -364,6 +371,74 @@ namespace Beytepe.EditorTools
                 int i = Mathf.FloorToInt((x - x0) / r), j = Mathf.FloorToInt((y - y0) / r);
                 return i >= 0 && j >= 0 && i < nx && j < ny && m[j * nx + i];
             }
+        }
+
+        // ================= road-surface repair (yol_duzelt) =================
+        // RoadRunner steps / creases the real road does not have (K3 exit, return merge, K13; the car jumped ~1 g there in every
+        // tour). Inside each zone the road-layer (Roads_Road) vertices are put on the smoothed surface (hedef); every other
+        // terrain layer (marking, gutter, curb, sidewalk, grass), and road vertices where hedef is undefined, get the height
+        // change of the top road surface (delta), so curbs and gutters keep their shape. Triangles there are split to <= 0.5 m
+        // first so the new surface is followed closely. Vertices more than 2 m from the new road surface (another level) stay.
+        static float[] B64F32(string b) { var by = Convert.FromBase64String(b); var f = new float[by.Length / 4]; Buffer.BlockCopy(by, 0, f, 0, by.Length); return f; }
+
+        static void ApplyYolDuzelt(GameObject model, YolDuzeltVeri d)
+        {
+            foreach (var b in d.bolgeler)
+            {
+                if (string.IsNullOrEmpty(b.hedef) || string.IsNullOrEmpty(b.delta) || b.nx < 2 || b.ny < 2) continue;
+                var hedef = B64F32(b.hedef); var delta = B64F32(b.delta);
+                if (hedef.Length != b.nx * b.ny || delta.Length != b.nx * b.ny) { L($"UYARI: yol düzeltme {b.ad}: ızgara boyu tutmuyor"); continue; }
+                float r = b.cozunurluk;
+                // bilinear between cell centres; all4: every corner must be defined (> -900), else undefined corners count as 0
+                bool Bil(float[] a, float x, float y, bool all4, out float val)
+                {
+                    val = 0f;
+                    float fx = (x - b.x0) / r - 0.5f, fy = (y - b.y0) / r - 0.5f;
+                    int i0 = Mathf.FloorToInt(fx), j0 = Mathf.FloorToInt(fy);
+                    if (i0 < 0 || j0 < 0 || i0 + 1 >= b.nx || j0 + 1 >= b.ny) return false;
+                    float tx = fx - i0, ty = fy - j0;
+                    for (int dj = 0; dj < 2; dj++)
+                        for (int di = 0; di < 2; di++)
+                        {
+                            float c = a[(j0 + dj) * b.nx + i0 + di];
+                            if (c < -900f) { if (all4) return false; continue; }
+                            val += c * (di == 0 ? 1 - tx : tx) * (dj == 0 ? 1 - ty : ty);
+                        }
+                    return true;
+                }
+                bool Touches(Vector3 w)
+                {
+                    var q = UnityToRos(w);
+                    return Bil(hedef, q.x, q.y, false, out var h) && h != 0f || Bil(delta, q.x, q.y, false, out var dd) && Mathf.Abs(dd) > 0.005f;
+                }
+                var box = RosBox(b.x0, b.x0 + b.nx * r, b.y0, b.y0 + b.ny * r);
+                int nMesh = 0, nVert = 0, nSplit = 0; float up = 0f, down = 0f;
+                foreach (var mf in TerrainMeshes(model, box))
+                {
+                    bool isRoad = FullName(mf.transform).IndexOf("Roads_Road", StringComparison.OrdinalIgnoreCase) >= 0;
+                    var m = new DuzenlenenMesh(mf, null);
+                    m.Subdivide((wa, wb, wc) => Touches(wa) || Touches(wb) || Touches(wc), 0.5f);
+                    var changed = new bool[m.pos.Count]; int c = 0;
+                    for (int v = 0; v < m.pos.Count; v++)
+                    {
+                        var w = m.W(v); var q = UnityToRos(w);
+                        bool hasH = Bil(hedef, q.x, q.y, true, out float h);
+                        if (hasH && Mathf.Abs(q.z - h) > 2f) continue;          // another level (bridge, road below)
+                        float nz;
+                        if (isRoad && hasH) nz = h;
+                        else if (Bil(delta, q.x, q.y, false, out float dd) && Mathf.Abs(dd) > 1e-4f) nz = q.z + dd;
+                        else continue;
+                        if (Mathf.Abs(nz - q.z) < 1e-4f) continue;
+                        up = Mathf.Max(up, nz - q.z); down = Mathf.Min(down, nz - q.z);
+                        w.y += nz - q.z; m.SetW(v, w); changed[v] = true; c++;
+                    }
+                    if (c == 0) continue;
+                    m.Commit("_yol_duzelt", changed, null);
+                    nMesh++; nVert += c; nSplit += m.nSplit;
+                }
+                L($"Yol düzeltme {b.ad}: {nMesh} mesh, {nVert} köşe ({nSplit} üçgen bölündü), değişim {down * 100f:F1} .. +{up * 100f:F1} cm");
+            }
+            Physics.SyncTransforms();
         }
 
         // ================= gate road (nizamiye) =================
@@ -1402,7 +1477,8 @@ namespace Beytepe.EditorTools
                 copy.transform.rotation = yaw * m.rot; copy.transform.localScale = m.scale;
                 copy.transform.localPosition = -(yaw * m.baseOff);
                 float s = Mathf.Clamp(a.boy / Mathf.Max(m.height, 0.1f), 0.2f, 6f);
-                float sh = Mathf.Clamp(2f * a.tac / Mathf.Max(m.width, 0.1f), 0.6f * s, 1.6f * s);
+                // a crown cut to stay off the lanes (kirp) must not be widened back to the model's usual proportions
+                float sh = Mathf.Clamp(2f * a.tac / Mathf.Max(m.width, 0.1f), a.kirp ? 0.05f * s : 0.6f * s, 1.6f * s);
                 holder.transform.localScale = new Vector3(sh, s, sh);
                 if (isTree) nT++; else nB++;
             }
@@ -1455,11 +1531,17 @@ namespace Beytepe.EditorTools
                 for (int k = 0; k <= n; k++) if (In(Vector3.Lerp(wa, wb, k / (float)n))) return true;
                 return false;
             }
-            float? MedianTop(Vector3 w)   // highest refüj surface above / below this point
+            // highest RAISED refüj surface (curb strip / grass) above / below this point. Not Refuj_Asfalt: that strip lies
+            // at road height in front of the curb, and taking it as the top sank the RoadRunner road under it by 7.5 cm
+            // (saw-tooth notches along the curb on the whole median, user 2026-11-24 "kaldırım yolu bozmuş").
+            float? MedianTop(Vector3 w)
             {
                 float? best = null;
                 foreach (var h in Physics.RaycastAll(new Vector3(w.x, w.y + 20f, w.z), Vector3.down, 40f, ~0, QueryTriggerInteraction.Ignore))
-                    if (h.collider.name.StartsWith("Refuj_") && (best == null || h.point.y > best)) best = h.point.y;
+                {
+                    var n = h.collider.name;
+                    if ((n.StartsWith("Refuj_Kaldirim") || n.StartsWith("Refuj_Cim")) && (best == null || h.point.y > best)) best = h.point.y;
+                }
                 return best;
             }
             int nMesh = 0, nSplit = 0, nLow = 0;
